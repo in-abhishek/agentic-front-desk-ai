@@ -1,5 +1,5 @@
 import { groq } from '@ai-sdk/groq';
-import { streamText, tool, CoreMessage,waitUntil } from 'ai'; 
+import { streamText, tool, CoreMessage} from 'ai'; 
 import { connectDB } from '@/lib/db';
 import { Client } from '@/models/Client';
 import { otpStorage } from '@/lib/redis';
@@ -44,11 +44,9 @@ CRITICAL INSTRUCTIONS:
                 const dynamicOTP = Math.floor(1000 + Math.random() * 9000).toString();
                 try {
                   await otpStorage.saveOTP(email.toLowerCase(), dynamicOTP);
-                  waitUntil(
                     sendOTPEmail(email.toLowerCase(), dynamicOTP, 'Prospect')
                       .then(() => console.log(`[BG MAIL] OTP sent to ${email}`))
                       .catch(err => console.error('Background OTP Email Error:', err))
-                  );
                 } catch (redisErr) {
                   console.error('Redis Save/Email Failed:', redisErr);
                 }
@@ -135,12 +133,9 @@ CRITICAL INSTRUCTIONS:
               const clientName = client.name;
 
               if (adviserEmail) {
-                waitUntil(
-                  
                   sendAdviserNotificationEmail(adviserEmail, adviserName, clientName, email.toLowerCase(), documentType)
                     .then(() => console.log(`[BG MAIL] Adviser notified at ${adviserEmail}`))
                     .catch(err => console.error('Background Adviser Email Error:', err))
-                );
               }
 
               return {
