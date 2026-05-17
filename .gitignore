@@ -1,0 +1,29 @@
+# Dependencies (Local system folders, do not push to github)
+/node_modules
+/.pnp
+.pnp.js
+
+# Next.js Build Outputs (Compiled production build files)
+/.next/
+/out/
+
+# Environment Variables (CRITICAL: Yeh aapke passwords aur API keys hain, kabhi push mat karna)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env*.local
+
+# Debug logs (Errors aur tracking logs)
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# System Files (Mac aur Windows ki temporary files)
+.DS_Store
+Thumbs.db
+
+# Vercel Deployment Configuration folder
+.vercel
