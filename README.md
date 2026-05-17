@@ -39,5 +39,5 @@ Shuru karne se pehle aapke system mein yeh cheezein installed honi chahiye:
 
 ### Step 1: Clone the Repository
 ```bash
-git clone [https://github.com/your-username/smart-home-loans-agent.git](https://github.com/your-username/smart-home-loans-agent.git)
+git clone https://github.com/in-abhishek/agentic-front-desk-ai.git
 cd smart-home-loans-agent

@@ -136,6 +136,7 @@ CRITICAL INSTRUCTIONS:
 
               if (adviserEmail) {
                 waitUntil(
+                  
                   sendAdviserNotificationEmail(adviserEmail, adviserName, clientName, email.toLowerCase(), documentType)
                     .then(() => console.log(`[BG MAIL] Adviser notified at ${adviserEmail}`))
                     .catch(err => console.error('Background Adviser Email Error:', err))
