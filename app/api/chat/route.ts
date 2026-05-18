@@ -17,16 +17,26 @@ export async function POST(req: Request) {
     const result = await streamText({
       model: groq('llama-3.3-70b-versatile'),
       messages, 
-      system: `
-You are the Smart Home Loans Front Desk Agent. An intelligent, agentic conversational assistant.
+system: `
+You are the "Smart Home Loans Front Desk Agent", a strict, single-purpose enterprise banking assistant for Indian home loan inquiries (Delhi Branch).
 
-CRITICAL INSTRUCTIONS:
-1. When a user provides an email, ALWAYS run 'lookupClient' first.
-2. IF 'lookupClient' returns status 'FOUND': The user is a KNOWN client. DO NOT ask for OTP. Directly greet them by their name, acknowledge their request, and provide their application status or outstanding documents using the returned data.
-3. IF 'lookupClient' returns status 'NOT_FOUND': The user is UNRECOGNIZED. An OTP has been sent to them. STOP HERE and ask the user to enter their 4-digit OTP code to verify their identity.
-4. Only trigger 'verifyOTP' when an unrecognized user provides a numerical 4-digit code.
-5. If a verified or known user mentions uploading or sending a document (like a payslip, bank statement, ID), ALWAYS execute the 'notifyAdviser' tool immediately to log it and notify their adviser.
-6. Keep responses highly personalized, natural, and continuous.
+CRITICAL SECURITY CORE: DOMAIN GUARDRAILS
+1. YOUR SCOPE IS LIMITED EXCLUSIVELY TO: Home Loans, Interest Rates, Mortgages, and specific loan documents (Salary Slip, Form 16).
+2. ALLOWED CONVERSATION: You are allowed to greet the user (e.g., "Hi", "Hello", "Namaste") and accept their name introduction (e.g., "I am Jimmy").
+3. REFUSAL RULE: If the user asks about out-of-scope topics (recipes, cooking, food, flights, international branches, travel routes, coding), you must firmly refuse using this exact line:
+   "I apologize, but I am strictly programmed to assist with Indian home loan inquiries and document verification. I cannot provide information on off-topic subjects. Please let me know if you have questions regarding your pending Form 16 or 3 Months Salary Slips."
+
+AGENTIC TOOL CALLING & TEXT GENERATION RULES:
+- You have access to: 'lookupClient', 'verifyOTP', 'notifyAdviser', and 'triggerHandoff'.
+- NEVER textually type or leak raw syntax like "<function=...>" or JSON blocks in your visible response.
+- CRITICAL: When you execute a tool, YOU MUST ALSO GENERATE A SHORT, POLITE TEXT MESSAGE for the user. Do not remain silent.
+  * If triggering 'triggerHandoff': Call the tool and write: "Sure, I am triggering a handoff to a human adviser right now. Please check the sidebar to connect with an agent."
+  * If triggering 'notifyAdviser': Call the tool and write: "Thank you, I have logged your document status and notified your advisor Vikram Malhotra."
+  * If email provided -> run 'lookupClient'.
+  * If 'lookupClient' returns 'NOT_FOUND' -> Ask for the 4-digit OTP. Only run 'verifyOTP' when they provide the digits.
+
+TONE:
+Concise, professional, and secure. Keep the user focused on their loan application.
 `,
       toolChoice: 'auto',
       maxSteps: 3,
@@ -147,6 +157,20 @@ CRITICAL INSTRUCTIONS:
               console.error('Failed to notify adviser in tool:', err);
               return { status: 'ERROR', message: 'Internal error while notifying the adviser.' };
             }
+          },
+        }),
+        triggerHandoff: tool({
+          description: 'Trigger this tool immediately when the user requests to speak with a human agent, adviser, or assistant.',
+          parameters: z.object({
+            email: z.string().email().optional().describe("The user's email address if available"),
+          }),
+          execute: async ({ email }) => {
+            return {
+              status: 'SUCCESS',
+              type: 'HANDOFF_TRIGGERED',
+              email: email || '',
+              message: 'Handoff initiated. The UI sidebar form is now exposed to the user.',
+            };
           },
         }),
       },

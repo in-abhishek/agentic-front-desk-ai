@@ -14,7 +14,6 @@ export default function SidebarContext({
   return (
     <div className="h-auto md:h-full bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950 p-6 flex flex-col justify-between border-l border-white/10 overflow-y-auto relative">
 
-      {/* Glow Background */}
       <div className="absolute top-0 right-0 w-72 h-72 bg-cyan-500/10 blur-3xl rounded-full"></div>
       <div className="absolute bottom-0 left-0 w-72 h-72 bg-blue-500/10 blur-3xl rounded-full"></div>
 
@@ -26,7 +25,6 @@ export default function SidebarContext({
         {uiState === 'INFO' && (
           <div className="space-y-5 animate-[fadeIn_0.5s_ease]">
 
-            {/* Interest Card */}
             <div className="relative overflow-hidden rounded-3xl border border-cyan-400/20 bg-gradient-to-br from-cyan-500/10 to-blue-500/10 backdrop-blur-xl p-5 shadow-[0_0_40px_rgba(34,211,238,0.08)] hover:scale-[1.02] transition duration-300">
 
               <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/5 to-transparent animate-pulse"></div>
@@ -48,7 +46,6 @@ export default function SidebarContext({
               </span>
             </div>
 
-            {/* Checklist */}
             <div className="bg-white/[0.04] backdrop-blur-xl border border-white/10 rounded-3xl p-5 shadow-xl hover:border-cyan-400/20 transition duration-300">
 
               <span className="font-bold text-sm text-white block mb-4 border-b border-white/10 pb-2">
@@ -74,7 +71,6 @@ export default function SidebarContext({
               </ul>
             </div>
 
-            {/* Footer Note */}
             <div className="p-4 bg-white/[0.03] text-slate-400 text-xs rounded-2xl border border-dashed border-white/10 text-center backdrop-blur-lg">
               Existing clients can query outstanding
               documents directly via chat.
@@ -126,7 +122,7 @@ export default function SidebarContext({
             </div>
 
             <div className="bg-white/[0.04] border border-white/10 rounded-3xl p-4 backdrop-blur-xl">
-              <HandoffForm defaultEmail={userEmail} />
+              <HandoffForm defaultEmail={userEmail} uiState={uiState} />
             </div>
           </div>
         )}

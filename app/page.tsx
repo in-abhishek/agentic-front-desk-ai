@@ -55,22 +55,22 @@ export default function Home() {
         const payload = lastTool.result as any;
 
         switch (payload.type) {
-          case 'OTP_TRIGGERED':
-            setUserEmail(
-              payload.email || ''
-            );
+          case 'OTP_TRIGGERED_FOR_NEW_USER': 
+            setUserEmail(payload.email || '');
             setUiState('OTP_ALERT');
             break;
 
-          case 'HANDOFF_TRIGGERED':
-            setUserEmail(
-              payload.email || ''
-            );
-            setUiState('HANDOFF');
+          case 'NEW_USER_VERIFIED': 
+            setUiState('INFO'); 
             break;
 
-          case 'OTP_VERIFIED':
-            setUiState('INFO');
+          case 'HANDOFF_TRIGGERED':
+            if (payload.email && payload.email.includes('@')) {
+              setUserEmail(payload.email);
+            } else {
+              setUserEmail('');
+            }
+            setUiState('HANDOFF');
             break;
         }
       }
@@ -106,9 +106,9 @@ export default function Home() {
           {messages.length === 0 && (
             <div className="text-center text-slate-300 text-sm h-full my-auto flex justify-center items-center ">
               <div className='p-6 border border-white/10 rounded-2xl max-w-md mx-auto bg-white/5 backdrop-blur-lg shadow-2xl animate-fadeIn '>
-              Welcome! Please share your{' '}
+              Hello and Welcome! Please share your{' '}
               <b className="text-cyan-300">
-                Email Address
+               Loan Query
               </b>
               .
               </div>

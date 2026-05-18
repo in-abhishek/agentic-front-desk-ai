@@ -9,7 +9,7 @@ type HandoffInput = {
   query: string;
 };
 
-export default function HandoffForm({ defaultEmail }: { defaultEmail: string }) {
+export default function HandoffForm({ defaultEmail,uiState }: { defaultEmail: string; uiState: string }) {
   const { register, handleSubmit, reset, formState: { errors } } = useForm<HandoffInput>({
         defaultValues: { email: defaultEmail },
         mode: "onChange" 
@@ -73,8 +73,8 @@ export default function HandoffForm({ defaultEmail }: { defaultEmail: string }) 
         <input 
           type="email"
           {...register("email", { required: "Email is required" })} 
-          className="w-full border border-gray-200 rounded px-3 py-2 text-sm bg-gray-100 text-gray-500 cursor-not-allowed"
-          readOnly
+          className={`w-full border border-gray-200 rounded px-3 py-2 text-sm ${uiState === 'INFO' && defaultEmail !== '' ? 'bg-gray-100 text-gray-500 cursor-not-allowed' : 'bg-white text-gray-600'}`}
+          readOnly={uiState === 'INFO' && defaultEmail !== ''}
         />
       </div>
 
