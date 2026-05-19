@@ -28,7 +28,6 @@ export async function POST(req: Request) {
 
     await connectDB();
 
-    // 1. Maintain state from session history
     const currentSlots = {
       user_type: sessionSlots?.user_type || null,
       client_name: sessionSlots?.client_name || null,
@@ -37,7 +36,6 @@ export async function POST(req: Request) {
       email: sessionSlots?.email || null,
     };
 
-    // Immediate dynamic email extraction string matching
     const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
     const extractedEmail = lastUserMsg.match(emailRegex);
     if (extractedEmail) {
@@ -47,9 +45,7 @@ export async function POST(req: Request) {
     let backendActionLogs: string[] = [];
     let adviserEmailToNotify: string | null = null; 
 
-    // ==========================================================
-    // FIX 1: ULTIMATE TYPE-SAFE & SPACE-SAFE OTP INTERCEPTOR
-    // ==========================================================
+   
     const is6DigitOtp = /^\d{6}$/.test(lastUserMsg);
     
     if (is6DigitOtp && currentSlots.email && currentSlots.pending_action === "VERIFY_OTP") {
@@ -97,9 +93,7 @@ export async function POST(req: Request) {
       }
     }
 
-    // ==========================================================
-    // SMART DATABASE SYNC & AUTO-VERIFICATION FOR KNOWN USERS
-    // ==========================================================
+   
     let dbContextInfo = "No account lookup performed yet because email is missing.";
     let clientRecord = null;
 
@@ -109,7 +103,6 @@ export async function POST(req: Request) {
         currentSlots.user_type = "KNOWN";
         currentSlots.client_name = clientRecord.name;
         
-        // AGAR USER DATABASE MEIN HAI TO OTP AUTO-VERIFY MANA JAYEGA (NO OTP REQUIRED)
         currentSlots.is_otp_verified = true; 
         
         adviserEmailToNotify = clientRecord.assignedAdviserEmail || "default-adviser@homeloans.com"; 
@@ -122,30 +115,22 @@ export async function POST(req: Request) {
         Loan Application Status: ${clientRecord.applicationStatus}.
         Pending/Outstanding Documents: ${pendingDocs}.`;
       } else {
-        // AGAR USER DB MEIN NAHI HAI TO OTP KI REQUIREMENT RAHEGI
         currentSlots.user_type = "UNKNOWN";
         dbContextInfo = `Account NOT found for email ${currentSlots.email}. User is UNKNOWN. Verification required if performing protected actions.`;
       }
     }
 
-    // Capture dynamic user context triggers
     const wantsStatus = lastUserMsg.toLowerCase().includes('status') || currentSlots.pending_action === 'SHOW_STATUS';
     const isResendRequest = lastUserMsg.toLowerCase().includes('nhi aayi') || lastUserMsg.toLowerCase().includes('nahi aayi') || lastUserMsg.toLowerCase().includes('resend');
 
-    // ==========================================================
-    // FIX 2: UPLOADED / SUBMITTED DOCUMENT INTERCEPT DETECTION
-    // ==========================================================
+   
     const userClaimedSubmission = lastUserMsg.toLowerCase().includes('submit') || 
-                                  lastUserMsg.toLowerCase().includes('upload') || 
-                                  lastUserMsg.toLowerCase().includes('bhej diya') || 
-                                  lastUserMsg.toLowerCase().includes('de diya');
+                                  lastUserMsg.toLowerCase().includes('upload');
 
     if (userClaimedSubmission) {
       if (currentSlots.user_type === "KNOWN") {
-        // SNEHA CASE: Seedhe adviser handoff state trigger hoga bina OTP ke
         currentSlots.pending_action = "HUMAN_HANDOFF";
       } else if (currentSlots.user_type === "UNKNOWN") {
-        // SURESH CASE: DB mein nahi hai toh pehle verification block par bhejenge
         currentSlots.pending_action = "VERIFY_OTP";
       }
     }
@@ -160,7 +145,6 @@ export async function POST(req: Request) {
       `;
     }
 
-    // 3. System Instruction - Strict Slot Mapping & DB Document Rules
     const systemInstruction = `
 You are the "Smart Home Loans Front Desk Agent" for Indian home loan inquiries (Delhi Branch).
 You operate purely using fluid slot-filling properties.
@@ -189,7 +173,6 @@ INSTRUCTION FOR OUTPUT:
 Fill the JSON structure perfectly. Keep responses natural, short, and targeted.
 `;
 
-    // 4. Run LLM
     const { object: llmOutput } = await generateObject({
       model: groq('llama-3.1-8b-instant'),
       messages,
@@ -197,7 +180,6 @@ Fill the JSON structure perfectly. Keep responses natural, short, and targeted.
       schema: SlotFillingSchema,
     });
 
-    // 5. Merge Outputs cleanly
     let finalReply = llmOutput.reply;
     const updatedSlots = {
       user_type: llmOutput.updated_slots.user_type || currentSlots.user_type,
@@ -208,7 +190,6 @@ Fill the JSON structure perfectly. Keep responses natural, short, and targeted.
       phone: sessionSlots?.phone || null,
     };
 
-    // HARD SECURITY GUARD RAIL: Ensure state persistency
     if (!updatedSlots.email) {
       updatedSlots.pending_action = null;
       updatedSlots.user_type = null;
@@ -219,14 +200,23 @@ Fill the JSON structure perfectly. Keep responses natural, short, and targeted.
       }
     }
 
-    // 6. Side Effects Engine - Fires OTP ONLY if LLM explicitly resolves pending_action to VERIFY_OTP
     if (updatedSlots.pending_action === "VERIFY_OTP" && updatedSlots.email && (!updatedSlots.is_otp_verified || isResendRequest)) {
       try {
         const generatedOtp = Math.floor(100000 + Math.random() * 900000).toString();
         await otpStorage.saveOTP(updatedSlots.email, generatedOtp);
         
         const recipientName = updatedSlots.client_name || "Valued Customer";
-        await sendOTPEmail(updatedSlots.email, generatedOtp, recipientName);
+        new Promise((resolve, reject) => {
+          sendOTPEmail(updatedSlots.email, generatedOtp, recipientName)
+            .then((res) => {
+              console.log("[BACKGROUND SUCCESS] OTP Email delivered to server.");
+              resolve(res);
+            })
+            .catch((err) => {
+              console.error("[BACKGROUND ERROR] OTP Email delivery failed:", err);
+              reject(err);
+            });
+        });
         
         backendActionLogs.push(`[OTP Engine] Security token successfully sent to: ${updatedSlots.email}`);
       } catch (otpErr) {
@@ -235,9 +225,6 @@ Fill the JSON structure perfectly. Keep responses natural, short, and targeted.
       }
     }
 
-    // ==========================================
-    // BACKEND ADVISER NOTIFICATION ACTION TRIGGER
-    // ==========================================
     if (updatedSlots.pending_action === "HUMAN_HANDOFF" && updatedSlots.email && updatedSlots.is_otp_verified) {
       const activeName = updatedSlots.client_name || "Customer";
       
@@ -250,13 +237,21 @@ Fill the JSON structure perfectly. Keep responses natural, short, and targeted.
             detectedDoc = "3 Months Salary Slip";
           }
 
-          await sendAdviserNotificationEmail(
+          new Promise((resolve, reject) => {
+          sendAdviserNotificationEmail(
             adviserEmailToNotify,                  
             "Adviser Team",                        
             activeName,                              
             updatedSlots.email,                      
             detectedDoc                             
-          );
+          )
+          .then((result) => {
+            resolve(result);
+          })
+          .catch((error) => {
+            reject(error);
+          });
+        });
           
           backendActionLogs.push(`[Mailer Engine] Successfully dispatched notification email to Assigned Adviser: ${adviserEmailToNotify}`);
         } catch (mailErr) {
