@@ -41,7 +41,7 @@ export async function sendAdviserNotificationEmail(
   adviserName: string, 
   clientName: string, 
   clientEmail: string, 
-  documentType: string
+  userMessage: string
 ) {
   const mailOptions = {
     from: `"Smart Home Loans Desk" <${process.env.EMAIL_USER}>`,
@@ -64,7 +64,7 @@ export async function sendAdviserNotificationEmail(
           </tr>
           <tr style="background-color: #f8f9fa;">
             <td style="padding: 10px; border: 1px solid #ddd; font-weight: bold;">Document Received:</td>
-            <td style="padding: 10px; border: 1px solid #ddd; color: #202124; font-weight: bold; text-transform: capitalize;">${documentType}</td>
+            <td style="padding: 10px; border: 1px solid #ddd; color: #202124; font-weight: bold; text-transform: capitalize;">${userMessage}</td>
           </tr>
         </table>
         

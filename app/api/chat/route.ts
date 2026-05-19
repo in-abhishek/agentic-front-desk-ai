@@ -1,241 +1,281 @@
 import { groq } from '@ai-sdk/groq';
-import { streamText, tool, CoreMessage} from 'ai'; 
+import { generateObject } from 'ai'; 
 import { connectDB } from '@/lib/db';
 import { Client } from '@/models/Client';
 import { otpStorage } from '@/lib/redis';
 import { z } from 'zod';
-import { sendOTPEmail, sendAdviserNotificationEmail } from '@/lib/mailer';
+import { sendOTPEmail } from '@/lib/mailer'; 
+import { sendAdviserNotificationEmail } from '@/lib/mailer'; 
+
+const SlotFillingSchema = z.object({
+  updated_slots: z.object({
+    user_type: z.enum(['KNOWN', 'UNKNOWN']).nullable(),
+    client_name: z.string().nullable(),
+    is_otp_verified: z.boolean(),
+    pending_action: z.enum(['SHOW_STATUS', 'SHARE_LOAN_LINK', 'HUMAN_HANDOFF', 'VERIFY_OTP']).nullable(),
+  }),
+  extracted_lead_details: z.object({
+    name: z.string().nullable(),
+    email: z.string().nullable(),
+  }),
+  reply: z.string().describe("Your contextual response. Keep it short, natural, and friendly."),
+});
 
 export async function POST(req: Request) {
   try {
-    // 1. Messages ke sath frontend se chatState nikalien
-    const { messages, chatState }: { 
-      messages: CoreMessage[], 
-      chatState?: { step: string; name?: string; email?: string } 
-    } = await req.json();
+    const { messages, sessionSlots } = await req.json();
+    const lastUserMsg = messages[messages.length - 1]?.content?.toString().trim() || "";
 
     await connectDB();
 
-    // Default fallback state agar frontend se na aaye
-    const currentStep = chatState?.step || 'NEED_NAME';
-    const userName = chatState?.name || '';
-    const userEmail = chatState?.email || '';
+    // 1. Maintain state from session history
+    const currentSlots = {
+      user_type: sessionSlots?.user_type || null,
+      client_name: sessionSlots?.client_name || null,
+      is_otp_verified: sessionSlots?.is_otp_verified || false,
+      pending_action: sessionSlots?.pending_action || null,
+      email: sessionSlots?.email || null,
+    };
 
-    // 2. Base System Prompt (Domain Guardrails aur Rules)
-    let systemInstruction = `
-You are the "Smart Home Loans Front Desk Agent", a strict, single-purpose enterprise banking assistant for Indian home loan inquiries (Delhi Branch).
-
-CRITICAL SECURITY CORE: DOMAIN GUARDRAILS
-1. YOUR SCOPE IS LIMITED EXCLUSIVELY TO: Home Loans, Interest Rates, Mortgages, and document verification for loan applications.
-2. REFUSAL RULE: If the user asks about out-of-scope topics (recipes, cooking, flights, travel, coding, other AI systems), respond with:
-   "I apologize, but I am strictly programmed to assist with Indian home loan inquiries and document verification. I cannot provide information on off-topic subjects."
-
-AGENTIC TOOL CALLING RULES:
-- NEVER expose raw tool syntax, JSON, or function signatures in your visible response.
-- NEVER call a tool and stay silent. Every tool call must be followed by a visible response in the same turn.
-`;
-
-    // 3. DYNAMIC STATE-DRIVEN LOGIC BLOCK
-if (currentStep === 'NEED_NAME') {
-      systemInstruction += `
-CURRENT CONVERSATION STATE: NEED_NAME
-- Your ONLY goal right now is to identify the user's name, but you must do it politely and warmly.
-- The user might start with a casual greeting like "hii", "how are you", "namaste", or "hello". 
-- ALWAYS acknowledge their greeting first with a polite response (e.g., "I'm doing great, thank you for asking!", "Hello! Hope you are having a wonderful day.").
-- After responding to the greeting, gently and warmly ask for their name so you can assist them better.
-- If they provide a name, you MUST immediately call the 'saveName' tool.
-- CRITICAL: If they ask "who am I?" or talk off-topic before telling their name, do NOT invent a name. Just say: "I don't have your name in my records just yet. May I know your name, please?"
-`;
-    }
-    else if (currentStep === 'NEED_EMAIL') {
-      systemInstruction += `
-CURRENT CONVERSATION STATE: NEED_EMAIL
-- The user's name is confirmed as "${userName}". Address them respectfully by this name.
-- Your ONLY goal now is to request their email address to look up their account.
-- If they provide an email, call 'lookupClient'.
-- CRITICAL: If the user asks any account-specific questions (documents, status, adviser) BEFORE giving their email, respond: "I'd need to look up your account first, ${userName}. Could you please share your email address?"
-`;
-    } 
-    else if (currentStep === 'NEED_OTP') {
-      systemInstruction += `
-CURRENT CONVERSATION STATE: NEED_OTP
-- User "${userName}" with email "${userEmail}" is a brand NEW user candidate.
-- When they provide the digits, call 'verifyOTP'.
-- CRITICAL: They are NOT a registered client yet. They have NO active application, NO pending documents, and NO assigned adviser. Do NOT look up or assume any data. If they ask about pending documents, remind them they are new and need to complete verification or apply online.
-`;
-    } 
-    else if (currentStep === 'VERIFIED_OR_KNOWN') {
-      systemInstruction += `
-CURRENT CONVERSATION STATE: VERIFIED_OR_KNOWN
-- If 'lookupClient' was called and returned FOUND, use ONLY the data returned from that tool (outstandingDocuments, assignedAdviser).
-- If they are a verified NEW user, they have no record. Guide them to apply online (https://smart-homeloans.com/apply-online) or ask if they want to speak to a human agent ('triggerHandoff').
-- When calling 'triggerHandoff': say "I'm arranging a handoff to a human adviser right now. Please check the sidebar to connect with an agent."
-- When calling 'notifyAdviser': say "I've logged your document update and notified your adviser."
-`;
+    // Immediate dynamic email extraction string matching
+    const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+    const extractedEmail = lastUserMsg.match(emailRegex);
+    if (extractedEmail) {
+      currentSlots.email = extractedEmail[0].toLowerCase();
     }
 
-    // Tone setting
-    systemInstruction += `\nTONE:\nConcise, professional, and warm. Keep the user focused on their loan application.`;
+    let backendActionLogs: string[] = [];
+    let adviserEmailToNotify: string | null = null; 
 
-    const result = await streamText({
-      model: groq('llama-3.1-8b-instant'),
-      messages, 
-      system: systemInstruction,
-      toolChoice: 'auto',
-      maxSteps: 5,
-      tools: {
-        // --- NAYA TOOL ADD KIYA FOR STATE CONTROL ---
-        saveName: tool({
-          description: 'Call this tool immediately when the user provides their name in any format.',
-          parameters: z.object({
-            name: z.string().describe("The extracted proper noun representing the user's name"),
-          }),
-          execute: async ({ name }) => {
-            return {
-              status: 'SUCCESS',
-              type: 'NAME_EXTRACTED',
-              extractedName: name,
-              message: 'Name successfully saved. Now guide the user to provide their email address.'
-            };
-          }
-        }),
+    // ==========================================================
+    // FIX 1: ULTIMATE TYPE-SAFE & SPACE-SAFE OTP INTERCEPTOR
+    // ==========================================================
+    const is6DigitOtp = /^\d{6}$/.test(lastUserMsg);
+    
+    if (is6DigitOtp && currentSlots.email && currentSlots.pending_action === "VERIFY_OTP") {
+      const cachedOtp = await otpStorage.getOTP(currentSlots.email);
+      
+      const cleanCached = cachedOtp ? cachedOtp.toString().trim() : "";
+      const cleanInput = lastUserMsg.toString().trim();
 
-        lookupClient: tool({
-          description: 'Look up a client account using their email address to check if they are an existing customer.',
-          parameters: z.object({
-            email: z.string().email(),
-          }),
-          execute: async ({ email }) => {
-            try {
-              const client = await Client.findOne({ email: email.toLowerCase() });
-
-              if (!client) {
-                const dynamicOTP = Math.floor(1000 + Math.random() * 9000).toString();
-                try {
-                  await otpStorage.saveOTP(email.toLowerCase(), dynamicOTP);
-                  sendOTPEmail(email.toLowerCase(), dynamicOTP, 'Prospect')
-                    .then(() => console.log(`[BG MAIL] OTP sent to ${email}`))
-                    .catch(err => console.error('Background OTP Email Error:', err))
-                } catch (redisErr) {
-                  console.error('Redis Save/Email Failed:', redisErr);
-                }
-
-                return {
-                  status: 'NOT_FOUND',
-                  type: 'OTP_TRIGGERED_FOR_NEW_USER',
-                  email: email.toLowerCase(),
-                  message: 'No client profile found. OTP sent to verify this new user. Stop here and wait for OTP.',
-                };
-              }
-
-              return {
-                status: 'FOUND',
-                type: 'KNOWN_CLIENT',
-                email: client.email,
-                name: client.name,
-                applicationStatus: client.applicationStatus || 'Unknown',
-                rejectionReason: client.rejectionReason,
-                outstandingDocuments: client.outstandingDocuments || [],
-                assignedAdviser: client.assignedAdviser || 'General Adviser',
-                message: 'Client found successfully. Do NOT ask for OTP. Directly respond using this data.',
-              };
-            } catch (err) {
-              console.error('Error in lookupClient tool:', err);
-              return { status: 'ERROR', message: 'Database lookup failed.' };
-            }
-          },
-        }),
-
-        verifyOTP: tool({
-          description: 'Verify the OTP code for an unrecognized/new user.',
-          parameters: z.object({
-            email: z.string().email(),
-            userOTP: z.string(),
-          }),
-          execute: async ({ email, userOTP }) => {
-            try {
-              const cleanEmail = email.toLowerCase().trim();
-              const cleanUserOTP = userOTP.trim();
-              
-              if (!cleanUserOTP || cleanUserOTP.length < 4) {
-                return { status: 'INVALID', message: 'User has not typed a valid 4-digit OTP yet.' };
-              }
-              
-              const rawSavedOTP = await otpStorage.getOTP(cleanEmail);
-              const savedOTP = rawSavedOTP ? rawSavedOTP.toString().trim() : null;
-
-              if (!savedOTP || savedOTP !== cleanUserOTP) {
-                return { status: 'INVALID', message: 'Invalid OTP.' };
-              }
-
-              await otpStorage.deleteOTP(cleanEmail);
-
-              return {
-                status: 'VERIFIED',
-                type: 'NEW_USER_VERIFIED',
-                message: 'OTP Verified successfully. Share the online loan application link or offer a human adviser handoff.',
-                onlineJourneyLink: 'https://smart-homeloans.com/apply-online',
-              };
-            } catch (err) {
-              console.error('Error in verifyOTP tool:', err);
-              return { status: 'ERROR', message: 'OTP verification internal error.' };
-            }
-          },
-        }),
+      if (cleanCached && cleanCached === cleanInput) {
+        currentSlots.is_otp_verified = true;
+        currentSlots.pending_action = null; 
         
-        notifyAdviser: tool({
-          description: 'Notify the assigned adviser when a client mentions or uploads a document.',
-          parameters: z.object({
-            email: z.string().email().describe('The client\'s email address'),
-            documentType: z.string().describe('The type of document mentioned, e.g., payslip, bank statement'),
-          }),
-          execute: async ({ email, documentType }) => {
-            try {
-              const client = await Client.findOne({ email: email.toLowerCase() });
+        await otpStorage.deleteOTP(currentSlots.email); 
+        backendActionLogs.push(`[OTP Engine] Token match successful for ${currentSlots.email}`);
 
-              if (!client) {
-                return { status: 'ERROR', message: 'Client not found.' };
-              }
+        const updatedSlots = {
+          ...currentSlots,
+          phone: sessionSlots?.phone || null,
+        };
 
-              const adviserName = client.assignedAdviser?.name || 'Loan Adviser';
-              const adviserEmail = client.assignedAdviser?.email;
-              const clientName = client.name;
+        return new Response(JSON.stringify({
+          slots: updatedSlots,
+          backend_logs: backendActionLogs,
+          reply: `Thank you! Your email verification is successful. Since we didn't find any existing loan application under this email, would you like me to share the link to start a new application, or would you like to speak to an adviser?`,
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      } else {
+        backendActionLogs.push(`[OTP Engine] Invalid code attempt. Cached: ${cleanCached}, Input: ${cleanInput}`);
+        const updatedSlots = {
+          ...currentSlots,
+          is_otp_verified: false, 
+          phone: sessionSlots?.phone || null,
+        };
 
-              if (adviserEmail) {
-                  sendAdviserNotificationEmail(adviserEmail, adviserName, clientName, email.toLowerCase(), documentType)
-                    .then(() => console.log(`[BG MAIL] Adviser notified at ${adviserEmail}`))
-                    .catch(err => console.error('Background Adviser Email Error:', err))
-              }
+        return new Response(JSON.stringify({
+          slots: updatedSlots,
+          backend_logs: backendActionLogs,
+          reply: `Sorry, the verification code you entered is incorrect or has expired. Please check your email and try again, or ask me to resend it.`,
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+    }
 
-              return {
-                status: 'SUCCESS',
-                message: `Adviser ${adviserName} has been successfully notified via a professional email (${adviserEmail}) about the submission of the ${documentType}.`,
-              };
+    // ==========================================================
+    // SMART DATABASE SYNC & AUTO-VERIFICATION FOR KNOWN USERS
+    // ==========================================================
+    let dbContextInfo = "No account lookup performed yet because email is missing.";
+    let clientRecord = null;
 
-            } catch (err) {
-              console.error('Failed to notify adviser in tool:', err);
-              return { status: 'ERROR', message: 'Internal error while notifying the adviser.' };
-            }
-          },
-        }),
-        triggerHandoff: tool({
-          description: 'Trigger this tool immediately when the user requests to speak with a human agent, adviser, or assistant.',
-          parameters: z.object({
-            email: z.string().email().optional().describe("The user's email address if available"),
-          }),
-          execute: async ({ email }) => {
-            return {
-              status: 'SUCCESS',
-              type: 'HANDOFF_TRIGGERED',
-              email: email || '',
-              message: 'Handoff initiated. The UI sidebar form is now exposed to the user.',
-            };
-          },
-        }),
-      },
+    if (currentSlots.email) {
+      clientRecord = await Client.findOne({ email: currentSlots.email.toLowerCase() });
+      if (clientRecord) {
+        currentSlots.user_type = "KNOWN";
+        currentSlots.client_name = clientRecord.name;
+        
+        // AGAR USER DATABASE MEIN HAI TO OTP AUTO-VERIFY MANA JAYEGA (NO OTP REQUIRED)
+        currentSlots.is_otp_verified = true; 
+        
+        adviserEmailToNotify = clientRecord.assignedAdviserEmail || "default-adviser@homeloans.com"; 
+        
+        const pendingDocs = clientRecord.outstandingDocuments && clientRecord.outstandingDocuments.length > 0
+          ? clientRecord.outstandingDocuments.join(", ")
+          : "None";
+
+        dbContextInfo = `Account FOUND for ${clientRecord.name}. User is KNOWN. 
+        Loan Application Status: ${clientRecord.applicationStatus}.
+        Pending/Outstanding Documents: ${pendingDocs}.`;
+      } else {
+        // AGAR USER DB MEIN NAHI HAI TO OTP KI REQUIREMENT RAHEGI
+        currentSlots.user_type = "UNKNOWN";
+        dbContextInfo = `Account NOT found for email ${currentSlots.email}. User is UNKNOWN. Verification required if performing protected actions.`;
+      }
+    }
+
+    // Capture dynamic user context triggers
+    const wantsStatus = lastUserMsg.toLowerCase().includes('status') || currentSlots.pending_action === 'SHOW_STATUS';
+    const isResendRequest = lastUserMsg.toLowerCase().includes('nhi aayi') || lastUserMsg.toLowerCase().includes('nahi aayi') || lastUserMsg.toLowerCase().includes('resend');
+
+    // ==========================================================
+    // FIX 2: UPLOADED / SUBMITTED DOCUMENT INTERCEPT DETECTION
+    // ==========================================================
+    const userClaimedSubmission = lastUserMsg.toLowerCase().includes('submit') || 
+                                  lastUserMsg.toLowerCase().includes('upload') || 
+                                  lastUserMsg.toLowerCase().includes('bhej diya') || 
+                                  lastUserMsg.toLowerCase().includes('de diya');
+
+    if (userClaimedSubmission) {
+      if (currentSlots.user_type === "KNOWN") {
+        // SNEHA CASE: Seedhe adviser handoff state trigger hoga bina OTP ke
+        currentSlots.pending_action = "HUMAN_HANDOFF";
+      } else if (currentSlots.user_type === "UNKNOWN") {
+        // SURESH CASE: DB mein nahi hai toh pehle verification block par bhejenge
+        currentSlots.pending_action = "VERIFY_OTP";
+      }
+    }
+
+    let activeGuidance = "";
+    if (currentSlots.pending_action === "HUMAN_HANDOFF" || lastUserMsg.toLowerCase().includes('adviser')) {
+      activeGuidance = `
+      CRITICAL SITUATION: The user wants to speak to an adviser OR has claimed that they have already submitted/uploaded their outstanding documents.
+      - Change 'pending_action' to "HUMAN_HANDOFF" right now.
+      - In your 'reply', explicitly acknowledge their submission claim and tell them that a loan adviser is being assigned to verify it right away.
+      - If Email is missing, your 'reply' MUST ask for it first.
+      `;
+    }
+
+    // 3. System Instruction - Strict Slot Mapping & DB Document Rules
+    const systemInstruction = `
+You are the "Smart Home Loans Front Desk Agent" for Indian home loan inquiries (Delhi Branch).
+You operate purely using fluid slot-filling properties.
+
+CURRENT CONVERSATION SLOTS STATE:
+- user_type: ${currentSlots.user_type}
+- client_name: ${currentSlots.client_name}
+- is_otp_verified: ${currentSlots.is_otp_verified}
+- pending_action: ${currentSlots.pending_action}
+- current_email: ${currentSlots.email}
+
+DATABASE CONTEXT:
+${dbContextInfo}
+
+${activeGuidance}
+
+CRITICAL RULES ORDER:
+1. IF 'current_email' IS MISSING/NULL: You absolutely CANNOT check loan status or clear any action. Your only task is to greet the user and ask for their registered email address. Your 'reply' MUST be: "Sure, I can help you with your loan status. Could you please share your registered email ID?"
+2. IF USER IS "KNOWN" AND CLAIMS THEY SUBMITTED/UPLOADED PENDING DOCUMENTS: Route them to human support immediately. Set 'pending_action' to "HUMAN_HANDOFF". Your 'reply' MUST reassure them by saying that you are notifying an adviser to verify their newly submitted files.
+3. IF EMAIL IS ALREADY PROVIDED IN THE MESSAGE AND USER IS "UNKNOWN": You must transition to verification state. Set 'pending_action' to "VERIFY_OTP". Your 'reply' MUST inform them that you have sent a verification code to their email address to verify their identity. Do NOT ask them to share their email again.
+4. ANSWER DIRECTLY FROM DATABASE: If the user is a KNOWN customer and asks about pending or required documents, check "Pending/Outstanding Documents" inside DATABASE CONTEXT. List them explicitly by name so the user knows exactly what is missing.
+5. IF EMAIL IS AVAILABLE AND USER IS "KNOWN" (AND NOT CLAIMING DOCUMENT SUBMISSION): Automatically set 'pending_action' to "SHOW_STATUS". Greet them by name and present the status from DATABASE CONTEXT.
+6. If the user says they didn't get the verification code ("mail nhi aayi"), apologize and keep 'pending_action' as "VERIFY_OTP".
+
+INSTRUCTION FOR OUTPUT:
+Fill the JSON structure perfectly. Keep responses natural, short, and targeted.
+`;
+
+    // 4. Run LLM
+    const { object: llmOutput } = await generateObject({
+      model: groq('llama-3.1-8b-instant'),
+      messages,
+      system: systemInstruction,
+      schema: SlotFillingSchema,
     });
 
-    return result.toDataStreamResponse();
+    // 5. Merge Outputs cleanly
+    let finalReply = llmOutput.reply;
+    const updatedSlots = {
+      user_type: llmOutput.updated_slots.user_type || currentSlots.user_type,
+      client_name: currentSlots.client_name || llmOutput.updated_slots.client_name || llmOutput.extracted_lead_details.name,
+      is_otp_verified: llmOutput.updated_slots.is_otp_verified !== undefined ? llmOutput.updated_slots.is_otp_verified : currentSlots.is_otp_verified,
+      pending_action: llmOutput.updated_slots.pending_action || currentSlots.pending_action,
+      email: currentSlots.email || llmOutput.extracted_lead_details.email,
+      phone: sessionSlots?.phone || null,
+    };
+
+    // HARD SECURITY GUARD RAIL: Ensure state persistency
+    if (!updatedSlots.email) {
+      updatedSlots.pending_action = null;
+      updatedSlots.user_type = null;
+      updatedSlots.is_otp_verified = false;
+      
+      if (wantsStatus) {
+        finalReply = `Sure, I can help you with your loan status. Could you please share your registered email ID first?`;
+      }
+    }
+
+    // 6. Side Effects Engine - Fires OTP ONLY if LLM explicitly resolves pending_action to VERIFY_OTP
+    if (updatedSlots.pending_action === "VERIFY_OTP" && updatedSlots.email && (!updatedSlots.is_otp_verified || isResendRequest)) {
+      try {
+        const generatedOtp = Math.floor(100000 + Math.random() * 900000).toString();
+        await otpStorage.saveOTP(updatedSlots.email, generatedOtp);
+        
+        const recipientName = updatedSlots.client_name || "Valued Customer";
+        await sendOTPEmail(updatedSlots.email, generatedOtp, recipientName);
+        
+        backendActionLogs.push(`[OTP Engine] Security token successfully sent to: ${updatedSlots.email}`);
+      } catch (otpErr) {
+        console.error("Failed executing mail engine pipeline:", otpErr);
+        backendActionLogs.push(`[OTP Engine Exception] Errored sending dispatch to: ${updatedSlots.email}`);
+      }
+    }
+
+    // ==========================================
+    // BACKEND ADVISER NOTIFICATION ACTION TRIGGER
+    // ==========================================
+    if (updatedSlots.pending_action === "HUMAN_HANDOFF" && updatedSlots.email && updatedSlots.is_otp_verified) {
+      const activeName = updatedSlots.client_name || "Customer";
+      
+      if (userClaimedSubmission && adviserEmailToNotify) {
+        try {
+          let detectedDoc = "Outstanding Document";
+          if (lastUserMsg.toLowerCase().includes("form 16") || lastUserMsg.toLowerCase().includes("form16")) {
+            detectedDoc = "Form 16";
+          } else if (lastUserMsg.toLowerCase().includes("salary") || lastUserMsg.toLowerCase().includes("slip")) {
+            detectedDoc = "3 Months Salary Slip";
+          }
+
+          await sendAdviserNotificationEmail(
+            adviserEmailToNotify,                  
+            "Adviser Team",                        
+            activeName,                              
+            updatedSlots.email,                      
+            detectedDoc                             
+          );
+          
+          backendActionLogs.push(`[Mailer Engine] Successfully dispatched notification email to Assigned Adviser: ${adviserEmailToNotify}`);
+        } catch (mailErr) {
+          console.error("Failed notifying assigned adviser via mail:", mailErr);
+          backendActionLogs.push(`[Mailer Exception] Error sending mail alert to adviser: ${adviserEmailToNotify}`);
+        }
+      } else {
+        backendActionLogs.push(`Handoff executed for ${activeName} (${updatedSlots.email}) without document action.`);
+      }
+    }
+
+    return new Response(JSON.stringify({
+      slots: updatedSlots,
+      backend_logs: backendActionLogs,
+      reply: finalReply,
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
 
   } catch (error) {
     console.error("CRITICAL API ERROR:", error);

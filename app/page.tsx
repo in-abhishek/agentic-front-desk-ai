@@ -1,108 +1,87 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import SidebarContext from './components/SidebarContext';
+import SmoothTypewriter from './components/SmoothTypewriter';
 import { useChat } from '@ai-sdk/react';
+
+interface SlotState {
+  user_type: 'KNOWN' | 'UNKNOWN' | null;
+  client_name: string | null;
+  is_otp_verified: boolean;
+  pending_action: 'SHOW_STATUS' | 'SHARE_LOAN_LINK' | 'HUMAN_HANDOFF' | 'VERIFY_OTP' | null;
+  email: string | null;
+  phone: string | null;
+}
 
 export default function Home() {
   const [uiState, setUiState] = useState<'INFO' | 'OTP_ALERT' | 'HANDOFF'>('INFO');
   const [userEmail, setUserEmail] = useState('');
 
-  // --- HYBRID FLOW STATE STATE MANAGEMENT ---
-  const [chatState, setChatState] = useState<{
-    step: 'NEED_NAME' | 'NEED_EMAIL' | 'NEED_OTP' | 'VERIFIED_OR_KNOWN';
-    name: string;
-    email: string;
-  }>({
-    step: 'NEED_NAME',
-    name: '',
-    email: '',
+  const [sessionSlots, setSessionSlots] = useState<SlotState>({
+    user_type: null,
+    client_name: null,
+    is_otp_verified: false,
+    pending_action: null,
+    email: null,
+    phone: null,
   });
 
   const {
     messages,
+    setMessages,
     input,
     handleInputChange,
     handleSubmit,
     isLoading,
   } = useChat({
     api: '/api/chat',
-    maxSteps: 5,
-    // CRITICAL: Yeh body object har API hit ke sath latest state backend ko bhejega
     body: {
-      chatState: chatState,
+      sessionSlots: sessionSlots,
     },
-  });
-
-  useEffect(() => {
-    if (!messages || messages.length === 0) return;
-
-    // Last tool invocation result nikalna
-    const lastAssistantMessage = [...messages]
-      .reverse()
-      .find((msg) => msg.role === 'assistant' && msg.toolInvocations);
-
-    if (lastAssistantMessage && lastAssistantMessage.toolInvocations) {
-      const invocations = lastAssistantMessage.toolInvocations;
-      const lastTool = invocations[invocations.length - 1];
-
-      if (lastTool && lastTool.state === 'result' && lastTool.result) {
-        const payload = lastTool.result as any;
-
-        switch (payload.type) {
-          // Case 1: AI ne naam extract kar liya
-          case 'NAME_EXTRACTED':
-            setChatState((prev) => ({
-              ...prev,
-              step: 'NEED_EMAIL',
-              name: payload.extractedName,
-            }));
-            break;
-
-          // Case 2: Email database mein nahi mila, OTP bheja gaya
-          case 'OTP_TRIGGERED_FOR_NEW_USER':
-            setUserEmail(payload.email || '');
-            setUiState('OTP_ALERT');
-            setChatState((prev) => ({
-              ...prev,
-              step: 'NEED_OTP',
-              email: payload.email || '',
-            }));
-            break;
-
-          // Case 3: Naya user verified ho gaya
-          case 'NEW_USER_VERIFIED':
-            setUiState('INFO');
-            setChatState((prev) => ({
-              ...prev,
-              step: 'VERIFIED_OR_KNOWN',
-            }));
-            break;
-
-          // Case 4: Purana user directly database mein mil gaya
-          case 'KNOWN_CLIENT':
-            setUiState('INFO');
-            setChatState((prev) => ({
-              ...prev,
-              step: 'VERIFIED_OR_KNOWN',
-              name: payload.name || prev.name,
-              email: payload.email || prev.email,
-            }));
-            break;
-
-          // Case 5: Human handoff trigger ho gaya
-          case 'HANDOFF_TRIGGERED':
-            if (payload.email && payload.email.includes('@')) {
-              setUserEmail(payload.email);
-            } else {
-              setUserEmail('');
-            }
-            setUiState('HANDOFF');
-            break;
+    onResponse: async (response) => {
+      try {
+        const clonedResponse = response.clone();
+        const data = await clonedResponse.json();
+        
+        // Append the incoming message text cleanly
+        if (data && data.reply) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(),
+              role: 'assistant',
+              content: data.reply,
+              createdAt: new Date(),
+            },
+          ]);
         }
+
+        // Synchronize engine slot parameters
+        if (data && data.slots) {
+          const freshSlots: SlotState = data.slots;
+          setSessionSlots(freshSlots);
+
+          if (freshSlots.email) {
+            setUserEmail(freshSlots.email);
+          }
+
+          // Strict mapping layout states
+          if (freshSlots.pending_action === 'HUMAN_HANDOFF') {
+            setUiState('HANDOFF');
+          } 
+          else if (freshSlots.pending_action === 'VERIFY_OTP') { 
+            setUiState('OTP_ALERT');
+          } 
+          else {
+            setUiState('INFO');
+          }
+        }
+      } catch (err) {
+        console.error("Error capturing backend payload:", err);
       }
     }
-  }, [messages]);
+  });
 
   return (
     <div className="flex flex-col md:flex-row md:h-dvh w-full bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 font-sans md:overflow-hidden text-white">
@@ -118,7 +97,7 @@ export default function Home() {
             <div className="flex items-center gap-2 mt-1">
               <span className="h-2.5 w-2.5 rounded-full bg-emerald-400 animate-ping"></span>
               <span className="text-xs text-slate-300 font-medium tracking-wide">
-                AI Front Desk Active ({chatState.step})
+                AI Front Desk Active ({sessionSlots.pending_action || 'IDLE'})
               </span>
             </div>
           </div>
@@ -135,8 +114,13 @@ export default function Home() {
             </div>
           )}
 
-          {messages.map((msg) => {
+          {messages.map((msg, index) => {
             if (!msg.content || !msg.content.trim()) return null;
+
+            // Check if this particular assistant bubble is the newest one in the array
+            const isLatestAssistantMessage = 
+              msg.role === 'assistant' && 
+              index === messages.findLastIndex((m) => m.role === 'assistant');
 
             return (
               <div
@@ -161,9 +145,16 @@ export default function Home() {
                       </span>
                     ) : 'Desk Assistant'}
                   </span>
-                  <p className="whitespace-pre-wrap transition-all duration-300 ease-out">
-                    {msg.content}
-                  </p>
+                  
+                  <div className="text-slate-100">
+                    {isLatestAssistantMessage ? (
+                      // Smooth typewriter presentation for new arrivals
+                      <SmoothTypewriter text={msg.content} speed={15} />
+                    ) : (
+                      // Instant text rendering for history logs
+                      <p className="whitespace-pre-wrap">{msg.content}</p>
+                    )}
+                  </div>
                 </div>
               </div>
             );
@@ -171,10 +162,8 @@ export default function Home() {
 
           {isLoading && (
             <div className="flex items-center gap-3 text-slate-400 text-sm animate-pulse">
-              <div className="flex gap-1">
-                <div className="loader"></div>
-              </div>
-              Assistant is typing...
+              <div className="loader"></div>
+              Assistant is processing...
             </div>
           )}
         </div>
